@@ -1,0 +1,569 @@
+---
+title: "Boston Precipitation Prediction"
+author: "Mariam Serag, Salma Mohammed, Crystal Lee"
+date: "3/3/2020"
+output: 
+  word_document:
+    toc: TRUE
+---
+
+# Introduction
+
+We continue to use the same data in the A3 assighment and improve our best logistic regression model through adding new features. This time, we will perform custering methods, including K-means Clustering and Hierarchical Clustering, to group observations and produce clusters. Then, we can utilize these clusters to create new features and to further improve our model.
+
+# Part 1. Descriptive Statistics
+
+```{r setup, include=FALSE}
+# import neccessary parckages and our dataset
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(forecast)
+library(leaps)
+library(caret)
+library(ggplot2)
+library(cluster)    # clustering algorithms
+library(factoextra) # clustering algorithms & visualization
+library(ROCR)
+```
+
+## 1.1 Examining the dataset and cleaning data
+
+#### Examing the dataset:
+
+Last time, we conducted data cleaning and selected some variables to build model. Data are transformed based on the following rules.
+
+1. Each indicator have three variables, including average value, maximum value and minimum value. It cause our dataset to have lots of similar variables, such as `Avg.Temp`, `High Temp` and `Low Temp`. In order to avoid multicollinearity and overfitting, we just choose one of them in each indicator through an exploratory analysis.
+
+2. Column names look too complex and are hard to call these variables in functions, so it is better to change them into simple names.
+
+3. `Month` are numerical variables in our dataset but they should be categorical variables. Therefore, we should change their data types.
+
+4. `Day` column is just used for identifying observations. Specifically, it is like an ID for each obsercation. Thus, it is meaningless in this case and we should drop it.
+
+5. `Year` variable is not useful to predict future events, and thus we will remove this column later.
+
+6. `Events` is based on two variables, `Snowfall..in.` and `Precip..in.`. Since we view `Events` as our target variable, these two variables are meaningless in our analysis.
+
+7. In this case, we want to conduct binary classification. Thus, we simplify our problem to predict whether it will snow or not. That is, we create a new variable called `snow` (See the following chunk). This variables only include two values: `TRUE` and `FALSE`. `TURE` means it snowed that day. Otherwise. it didn't snow.
+
+
+```{r}
+bostonweather = read.csv('Boston weather_clean.csv')
+
+bostonweather_new = bostonweather[,c(2, 6, 10, 15, 18, 19, 24)]
+
+names(bostonweather_new)[1:6] = c('month', 'low_temp',  'high_humidity', 'low_sealevel', 'low_visibility', 'high_wind')
+
+bostonweather_new = 
+  bostonweather_new %>%
+  mutate(snow=ifelse(Events %in% c('Both', 'Snow'), TRUE, FALSE),
+         month=factor(month)) %>%
+  select(-c(Events)) 
+
+
+glimpse(bostonweather_new)
+```
+
+
+we chose `snow` as our target variable and picked other indicators as our independant variables that might be helpful to do a classification task
+
+
+```{r}
+ggplot(bostonweather_new, aes(x=factor(snow, levels=c(TRUE, FALSE)))) + 
+     geom_bar(stat = 'count', fill='steelblue2', width = 0.6) + 
+     labs(title = 'The Number of Days with and without snow falling', 
+          x     = 'Snow',
+          y     = 'Count') 
+```
+
+our task is to predict which day might snow based on some indicators, such as tempreture, dew point, humidity, sea level pressure, visibility, and wind. Therefore, from our previous assignment dataset, we chose `snow` as our target variable and picked other indicators as our independant variables that might be helpful to do a classification task
+
+
+
+#### Examining relationships betweenall variables
+
+```{r message=FALSE, fig.width=10, fig.height=10}
+bostonweather_new %>% ggpairs(., 
+               mapping = ggplot2::aes(colour=snow), 
+               lower = list(continuous = wrap("smooth", alpha = 0.3, size=0.1)))
+
+```
+
+
+#### Examining descriptive statistics of all variables
+
+```{r}
+psych::describe(bostonweather_new[-c(1,7)])
+```
+
+
+# Part 2: Clustering Models
+
+## 2-1. Preprocessing
+
+Before building clustering models, we have to preprocess our dataset.
+
+1. Clustering is an unsupervised learning task. That is, machine will learn the pattern from our dataset without labels or dependent variables. Therefore, we have to remove dependent variables.
+
+2. Clustering algorithm cannot deal with categorical variables. `month` is the only categorical variable in our dataset and it should be removed.
+
+3. Predictors have different scale of values and it might cause poor clustering results. It is necessary to normalize all independent vairables before implementing clustering algorithms.
+
+
+```{r}
+# remove the dependent variable and the categorical variable
+bostonweather_new.n <- bostonweather_new[-c(1,7)]
+
+
+# normalize input variables
+bostonweather_new.norm <- sapply(bostonweather_new.n, scale)
+```
+
+
+## 2-2. K-means Clustering
+
+### 2-2-1. Decide the number of clusters
+
+#### Method 1: Elbow Method
+K-means algorithm needs to specify the number of clusters as an input, but we don't know how many clusters is better. To decide the value of k. we used `fviz_nbclust` function to find the best value of k.
+
+```{r}
+# finding best k then running k-means algorithm
+set.seed(2)
+fviz_nbclust(bostonweather_new.norm, kmeans, method = "wss")
+```
+
+As we can see in the above plot, the higher the k is,  the lower the total within sum of square. To determine the optimal number of clusters, we should looks for a change of slope from steep to shallow (called an elbow). The total within sum of square decreases significantly when k increases to 2, but the value decreases more and more slowly when k increases. We can notice that the slope looks close to a horizontal line when k is larger than 5. However, it is hard to identify the elbow from the above plot. In this case, it might be 2, 3, 4 and 5. 
+
+
+#### Method 2: Silhouette Method
+
+To find out the best k, we use another method, the Silhouette Method, to determine the optimal number of clusters.
+
+```{r}
+fviz_nbclust(bostonweather_new.norm, kmeans, method = "silhouette", k.max = 24) + theme_minimal() + ggtitle("The Silhouette Plot")
+```
+
+Average silhouette widths is calculated using the mean intra-cluster distance and the mean nearest-cluster distance. The best k will have the largest value of average silhouette width. By computeing average silhouette widths for each k in the above, we can see the optimal values of k is 2.
+
+Therefore, we choose 2 as the number of clusters.
+
+```{r}
+# Build a kmeans model
+km <- kmeans(bostonweather_new.norm, 2)  
+
+# The data is clustering by temp, sea level and wind
+summary(km)
+
+# show cluster membership
+#km$cluster
+
+# centroids
+#km$centers
+```
+
+### 2-2-2. Save the clustering result back into the original dataframe
+
+```{r}
+bostonweather_new['km_cluster'] = factor(km$cluster)
+```
+
+
+### 2-2-3. Ploting Clusters
+
+#### Count Plot 
+
+```{r}
+barplot(table(km$cluster), ylim = c(0, 3500), main='Numbers of Clusters', 
+        xlab='Clusters', ylab='Count', col='steelblue2')
+```
+
+Two clusters have similar numbers. Overall, it shows that the results have balanced clusters.
+
+
+#### Frequency of Clusters in Snow Days and Non-snow Days
+
+```{r}
+p1 = bostonweather_new %>% 
+     filter(snow == TRUE) %>%
+     ggplot(aes(x=km_cluster)) + 
+     geom_bar(stat = 'count', width=0.6, fill='steelblue2') + 
+     labs(title='Snow Days', x='Clusters', y='Number of Days')
+p2 = bostonweather_new %>% 
+     filter(snow == FALSE) %>%
+     ggplot(aes(x=km_cluster)) + 
+     geom_bar(stat = 'count', width=0.6, fill='steelblue2') + 
+     labs(title='Non-snow Days', x='Clusters', y='Number of Days')
+
+cowplot::plot_grid(p1, p2,  align = "v", nrow = 1)
+```
+
+Most of Snow days belong to the cluster 2 whereas most of non-snow days belong to the cluster 1. In fact, there are still lots of non-snow days are classified to cluster 2.
+
+
+#### Clus Plot
+
+By using `fviz_cluster`, we can visualize the clustering results even if there are more than two variables in our dataset. Because it performs principal component analysis (PCA) and return the first two principal componetns that explain the majority of the variance, we can plot all data points in a 2 dimmensional scatter plot. 
+
+
+```{r warning=FALSE, echo=FALSE, fig.width=8, fig.height=6}
+fviz_cluster(km, data = bostonweather_new.norm, frame.type = "convex", labelsize = 0) + theme_minimal() + ggtitle("Clus Plot of K-means Clustering (k = 2)") 
+```
+
+Through running PCA, we can examine the weights of variables in the first and second components in the following:
+
+```{r}
+pca_tot = princomp(bostonweather_new.norm)
+pca_tot$loadings
+```
+
+
+#### Pair Plot
+
+To inspect the difference between two clusters, we make the following pair plot.
+
+```{r message=FALSE, echo=FALSE, fig.width=8, fig.height=8}
+ggpairs(bostonweather_new, 
+        columns=names(bostonweather_new)[2:6], 
+        mapping = ggplot2::aes(colour=km_cluster),
+        lower=list(continuous='blank'), 
+        axisLabels='none', upper=list(continuous='points')) +
+ggtitle('Pair Plot of K-means Clustering')
+
+
+```
+
+* From the diagnol distribution plots, two clusters have significant difference in `high_humidity` and `low_visibility`.
+
+* In the column of `low_visibility`, we can easily differentiate two clusters in each scatter plot. We can suggest that low_visibility is a crucial variable to group clusters.
+
+
+#### Profile Plot
+
+In addition to the pair plot, we can also look at a profile plot to examine major differnces in two clusters. Besides, we can further measure the range of these differences.
+
+```{r fig.width=8, fig.height=6, echo=FALSE}
+# plot an empty scatter plot
+plot(c(0), xaxt = 'n', ylab = "", type = "l", 
+     ylim = c(min(km$centers), max(km$centers)), 
+     xlim = c(0, 5))
+
+# label x-axes
+axis(1, at = c(1:5), labels = names(bostonweather_new.n), srt=45)
+
+title(main="Profile Plot of K-means Clustering",
+      ylab="Centroids")
+
+# plot centroids 
+for (i in c(1:2))
+  lines(km$centers[i,], lty = i, lwd = 2, 
+        col = switch(i, "black", "red", "green", "purple"))
+                                                       
+# name clusters
+text(x = 0.5, cex=1, y = km$centers[, 1], labels = paste("Cluster", c(1:2)))
+
+```
+
+There are two line representing difference cluster in the profile plot. Each point shows a centroid in each variable. In some variables, such as `high_humidity`, `low sea_level` and `low_visibility`, two clusters are far apart from each other. It shows that these variables primarily determine distinction between two clusters. Conversely, in `low_temp` and `high_wind`, two clusters are close to each other. Those variables might be less important to distinguish clusters.
+
+
+
+
+
+## 2-3. Hierarchical Clustering
+
+### 2-3-1. Building the clustering model
+
+```{r}
+set.seed(2)
+d.norm = dist(bostonweather_new.norm, method = "euclidean") 
+hc = hclust(d.norm, method = "average")
+
+plot(hc, hang = -1, ann = FALSE, main='Dendrogram of Hierarchial Clustering', 
+     ylab='Height')            
+
+```
+
+Because there are 3653 observations in our dataset, the dendrogram cannot show all of observations in the bottom nodes. Although we cannot tell hierarchical relationships between obsevations, we can roughly identify clusters are imbalanced. For example, in the height of around 3.5, we can group observations in two clusters. The left cluster is relatively large whereas the right cluster is really small.
+
+
+
+### 2-2-2. Decide the number of clusters
+
+In order to compare with the results of the K-means Clustering, we specify the value of k as 2, which is the same as the k in the K-means Clustering.
+
+```{r}
+hc_cut = cutree(hc, k = 2)
+```
+
+
+
+### 2-2-3. Save the hierarchical clustering result back into the original dataframe 
+
+```{r}
+bostonweather_new['hc_cluster'] = factor(hc_cut)
+```
+
+
+## 2-3. Plotting Hierarchical Clusters
+
+#### Count Plot 
+
+```{r}
+barplot(table(hc_cut), ylim = c(0, 3500), main='Numbers of Clusters', 
+xlab='Clusters', ylab='Count', col='steelblue2')
+```
+
+Two clusters have imblanced numbers. Overall, the cluster 2 is far less than the cluster 1. This result is consistent the result in the dendrogram.
+
+
+#### Frequency of Clusters in Snow Days and Non-snow Days
+
+```{r}
+p1 = bostonweather_new %>% 
+     filter(snow == TRUE) %>%
+     ggplot(aes(x=hc_cluster)) + 
+     geom_bar(stat = 'count', width=0.6, fill='steelblue2') + 
+     labs(title='Snow Days', x='Clusters', y='Number of Days')
+p2 = bostonweather_new %>% 
+     filter(snow == FALSE) %>%
+     ggplot(aes(x=hc_cluster)) + 
+     geom_bar(stat = 'count', width=0.6, fill='steelblue2') + 
+     labs(title='Non-snow Days', x='Clusters', y='Number of Days')
+
+cowplot::plot_grid(p1, p2,  align = "v", nrow = 1)
+```
+
+Most of snow days and non-snow days belong to the cluster 1.
+
+
+#### Pair Plot
+
+To inspect the difference between two clusters, we make the following pair plot.
+
+```{r message=FALSE, echo=FALSE, fig.width=8, fig.height=8}
+hc_pair = ggpairs(bostonweather_new, 
+                  columns=names(bostonweather_new)[2:6], 
+                  mapping = ggplot2::aes(colour=hc_cluster),
+                  lower=list(continuous='blank'), 
+                  axisLabels='none', 
+                  upper=list(continuous='points')) +
+          ggtitle('Pair Plot of Hierarchical Clustering') 
+hc_pair
+```
+
+* From the diagnol distribution plots, two clusters have significant difference in all varaibles other than `high_humidity`.
+
+* In the columns of `low_sealevel` and `high_wind`, we can easily differentiate two clusters in each scatter plot. We can suggest that these two variables are crucial variables to group clusters.
+
+
+# Part 3: Feature Engineering
+
+## 3-1. Preprocess
+
+To Partition the data, we split it to 80% training, 10% validating and 10% testing. We chose our outcome variable to be snow because it was better to simplify our original outcome variable (Events: snow, rain, none, both), especially that snow causes the most disruption in people's plans and requires the most resources to handle. 
+
+```{r}
+# Partition data
+set.seed(2)
+inx_train    = caret::createDataPartition(bostonweather_new$snow, p=0.8)$Resample1 
+dta_train    = bostonweather_new[ inx_train, ] 
+dta_left     = bostonweather_new[-inx_train, ]
+inx_test     = caret::createDataPartition(dta_left$snow, p=0.5)$Resample1
+dta_test     = dta_left[ inx_test, ]
+dta_valid    = dta_left[ -inx_test, ]
+```
+
+
+* Define a function we will use later. This function is used for finding the best threshold when we want to transform propabilities into class labels.
+
+```{r}
+best_threshold = function(pred_prob, labels){
+  pred = prediction(pred_prob, labels)
+  eval = performance(pred,"acc")
+
+  # find the best threshold
+  max_value = which.max(slot(eval,"y.values")[[1]])
+  acc = slot(eval,"y.values")[[1]][max_value]
+  thres = slot(eval,"x.values")[[1]][max_value]
+  return(thres)
+}
+```
+
+
+## 3-2. Training the Logistic Regression Model
+
+#### The best logistic model last time
+Accuracy : 0.9698
+Sensitivity : 0.9848         
+Specificity : 0.8286
+
+```{r}
+glm1 = glm(snow ~ low_visibility+low_temp + low_visibility*low_temp, 
+                   data = dta_train, 
+                   family = "binomial"(link = "logit"))
+
+summary(glm1)
+valid_glm1_prob = predict(glm1, dta_valid, type = "response")
+threshold_glm1 = best_threshold(valid_glm1_prob, dta_valid$snow)
+
+valid_glm1_pred <- as.factor(ifelse(valid_glm1_prob > threshold_glm1, TRUE, FALSE))
+conf_old = confusionMatrix(valid_glm1_pred, factor(dta_valid$snow), positive='TRUE')
+conf_old
+```
+
+
+
+#### Adding new features into the logistic regression model
+Accuracy : 0.9725 (last time: 0.9698)
+Sensitivity : 0.9143 (last time: 0.9848)         
+Specificity : 0.9787 (last time: 0.8286) 
+
+```{r}
+glm2 = 
+  glm(snow ~ low_visibility+low_temp+low_visibility*low_temp+km_cluster+hc_cluster,
+      data = dta_train, 
+      family = "binomial"(link = "logit"))
+
+summary(glm2)
+valid_glm2_prob = predict(glm2, dta_valid, type = "response")
+threshold_glm2 = best_threshold(valid_glm2_prob, dta_valid$snow)
+
+valid_glm2_pred <- as.factor(ifelse(valid_glm2_prob > threshold_glm2, TRUE, FALSE))
+conf_new =confusionMatrix(valid_glm2_pred, factor(dta_valid$snow), positive='TRUE') 
+conf_new
+```
+
+
+#### Comparing Results
+
+After adding new features in the logistic regression, accuracy increases 0.28%, from 0.9698 to 0.9725, and sensitivity significantly grows 10%, increases from 0.8286 to 0.9143. Although specificity slightly decreases 0.62%, in this case we want to accurately predict snow days. Therefore, we should focus on sensitivity and it indeed improves a lot in our new model.
+
+Although two clustering methods produce different results, through adding new features and giving more information to the model, we can get more accurate results and improve overall quality of our model. 
+
+```{r echo=FALSE, results='asis'}
+accuracy = data.frame(rbind(conf_old$overall['Accuracy'],
+                            conf_new$overall['Accuracy']))
+sens_spec = data.frame(rbind(conf_old$byClass[c('Sensitivity', 'Specificity')], 
+                             conf_new$byClass[c('Sensitivity', 'Specificity')]))
+
+comparison = cbind(accuracy, sens_spec)
+comparison = round(rbind(comparison, (comparison[2,]/comparison[1,]) - 1),4)
+row.names(comparison) = c('old_reg', 'new_reg', 'growth_rate')
+comparison %>%　
+  knitr::kable() %>%
+  kableExtra::kable_styling(bootstrap_options = "striped",
+                full_width = F, 
+                position="center") %>%
+  kableExtra::row_spec(3, bold = T, color = "red")
+
+```
+
+
+#### Apply the new model on the test set
+
+```{r}
+test_glm2_prob = predict(glm2, dta_test, type = "response")
+threshold_glm2 = best_threshold(test_glm2_prob, dta_test$snow)
+
+test_glm2_pred <- as.factor(ifelse(test_glm2_prob > threshold_glm2, TRUE, FALSE))
+conf_test =confusionMatrix(test_glm2_pred, factor(dta_test$snow), positive='TRUE') 
+conf_test
+
+```
+
+Accuracy and specificity look great and similar to the results in the validation set. However, sensitivity decreases a lot, only 0.8056. Obviously, the model is a little bit of overfitting. Luckily, we have selected featrues and removed outliers last time, so the overfitting problem seems not so serious.
+
+
+
+
+# Part 4: Characterization of Clusters
+
+#### K-means Cluster
+
+
+```{r fig.width=8, fig.height=6, echo=FALSE}
+# plot an empty scatter plot
+plot(c(0), xaxt = 'n', ylab = "", type = "l", 
+     ylim = c(min(km$centers), max(km$centers)), 
+     xlim = c(0, 5))
+
+# label x-axes
+axis(1, at = c(1:5), labels = names(bostonweather_new.n), srt=45)
+
+title(main="Profile Plot of K-means Clustering",
+      ylab="Centroids")
+
+# plot centroids 
+for (i in c(1:2))
+  lines(km$centers[i,], lty = i, lwd = 2, 
+        col = switch(i, "black", "red", "green", "purple"))
+                                                       
+# name clusters
+text(x = 0.5, cex=1, y = km$centers[, 1], labels = paste("Cluster", c(1:2)))
+
+```
+
+
+cluster 1: simiar to characteristics of non-snow days
+  * slightly lower temperature
+  * lower humidity
+  * high sea level
+  * high visibility
+  * slightly lower wind speed
+
+
+cluster 2: simiar to characteristics of snow days
+  * slightly higher temperature
+  * higher humidity
+  * lower sea level
+  * low34 visibility
+  * slightly higher wind speed
+
+
+
+#### Hierarchical Cluster
+
+```{r message=FALSE}
+hc_pair
+```
+
+
+cluster 1 (Green): close to characteristics of snow days
+  * lower temperature
+  * similar humidity with cluster 2
+  * lower sea level
+  * slightly lower visibility (but it shows a uniform distrubution, so somtimes it include some observations with higher visibility)
+  * high wind speed
+
+
+cluster 2 (Red): close to characteristics of non-snow days
+  * higher temperature
+  * similar humidity with cluster 2
+  * higher sea level
+  * higher visibility
+  * lower wind speed
+
+
+
+# Model Interpretation and Reflection
+
+ * Interpretation: 
+
+Both K-means Clustering and Hierarchical Clustering are unsupervised learning. Through computing distance and variance between variables, these algorithms can learn the latent patterns and classify observaions even if they don't have dependent variables. These clustering methods may produce different results even if they have the same number of clusters. Same observations might be assign to different cluster in two methods. Or, two points in the same cluster in K-means Clustering, but they might be separated into different clusters in Hierarchical Clustering. 
+
+Although two clustering methods produce different results, we can give more information to the regression model by adding these two clustering results. Our regression model can determine which features have more impact on the dependent varaibles and produce different weights for our new features. Thus, we can get more accurate results and improve overall quality of our model. 
+
+In fact, our logistic model indeed improved after adding two new features. In the test set, the model has 97.27% accuracy(old: 97.27%), 80.56% sensitivity(old: 77.78%), and 99.09%(99.39%) specificity. Accuracy and specificity are similar to the old model's results. However, sensitivity has improved a lot and it means that our model can predict snow days more accurately. 
+
+
+
+ * Overfitting: 
+We tried to limit overfitting first by looking at confusion matrices, but also by stopping early before we hit the point where we tailor our models too much to fit the training data. 
+ 
+ 
+ * Applications:
+We see one function for this model. It could be utilized by scientists or government agencies that care about snow. Engineers could possibly also care about how it impacts structures during and after building them. The model we created (or a good snow prediction model) could help those entities to some extent plan around predicting whether it will snow or not for future far away dates if they have the independent variables we relied on. In addition, whether it snows or not could also be an indicator of global warming trends that are witnessing and this could help us understand the degree to which global warming has started impacting us. 
+
+Besides, through clustering methods to create new features, it is more efficient and cheaper in the real world. Sometimes, models have poor performance because they don't have enough information. However, collecting new data is usually time-consuming and expensive. Instead, producing new features by unsupervised learning can save lots of time and effor for businesses, the government and non-profit orgranizations. 
